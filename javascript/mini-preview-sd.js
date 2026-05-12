@@ -228,30 +228,45 @@
     }
 
     function findLatestPreviewImage() {
-        const images = Array.from(document.querySelectorAll("img"))
+        const candidates = Array.from(document.querySelectorAll("img"))
             .filter(isCandidatePreviewImage)
-            .filter((img) => getImageSrc(img));
+            .filter((img) => getImageSrc(img))
+            .map((img, index) => {
+                const rect = img.getBoundingClientRect();
+                const area = Math.max(0, rect.width) * Math.max(0, rect.height);
+                const parent = img.parentElement;
+                const signature = `${img.id || ""} ${img.className || ""} ${parent ? parent.id : ""} ${parent ? parent.className : ""}`.toLowerCase();
+                const previewBoost = /preview|selected|active/.test(signature) ? 1000000 : 0;
 
-        if (!images.length) return null;
+                return { img, index, area, score: area + previewBoost };
+            })
+            .filter((candidate) => candidate.area > 0);
 
-        const visibleImages = images.filter((img) => {
-            const rect = img.getBoundingClientRect();
-            return rect.width > 0 && rect.height > 0;
-        });
+        if (!candidates.length) return null;
 
-        const candidates = visibleImages.length ? visibleImages : images;
-        return candidates[candidates.length - 1];
+        candidates.sort((a, b) => (b.score - a.score) || (b.index - a.index));
+        return candidates[0].img;
     }
 
-    function setFloatingImage(src, label) {
-        if (!src || src === state.lastImageSrc) return;
+    function setFloatingImage(src, label, sourceImage, forceRefresh) {
+        if (!src) return;
         ensurePanel();
 
+        const shouldUpdatePanelImage = forceRefresh || src !== state.lastImageSrc;
         state.lastImageSrc = src;
-        state.image.src = src;
         state.image.alt = label || "Mini Preview SD";
         state.title.textContent = label || "Mini Preview SD";
-        updateNativePipImage(src);
+
+        if (shouldUpdatePanelImage) {
+            state.image.src = src;
+        }
+
+        if (sourceImage) {
+            const updatedFromElement = updateNativePipFromElement(sourceImage);
+            if (!updatedFromElement) updateNativePipImage(src);
+        } else {
+            updateNativePipImage(src);
+        }
     }
 
     function supportsNativePictureInPicture() {
@@ -332,6 +347,17 @@
         return true;
     }
 
+    function updateNativePipFromElement(image) {
+        if (!state.pipReady || !(image instanceof HTMLImageElement) || !image.complete) return false;
+
+        try {
+            drawImageToPipCanvas(image);
+            return true;
+        } catch (error) {
+            return false;
+        }
+    }
+
     function updateNativePipImage(src) {
         if (!state.pipReady || !src) return;
 
@@ -352,7 +378,7 @@
         const sourceImage = img || findLatestPreviewImage();
         if (sourceImage) {
             const src = getImageSrc(sourceImage);
-            setFloatingImage(src, sourceImage.alt || sourceImage.title || "Mini Preview SD");
+            setFloatingImage(src, sourceImage.alt || sourceImage.title || "Mini Preview SD", sourceImage, true);
         }
 
         try {
@@ -385,7 +411,7 @@
         const sourceImage = img || findLatestPreviewImage();
         if (sourceImage) {
             const src = getImageSrc(sourceImage);
-            setFloatingImage(src, sourceImage.alt || sourceImage.title || "Mini Preview SD");
+            setFloatingImage(src, sourceImage.alt || sourceImage.title || "Mini Preview SD", sourceImage, true);
         }
 
         state.visible = true;
@@ -630,7 +656,7 @@
 
         const latestImage = findLatestPreviewImage();
         const src = getImageSrc(latestImage);
-        if (src) setFloatingImage(src, latestImage.alt || latestImage.title || "Mini Preview SD");
+        if (src) setFloatingImage(src, latestImage.alt || latestImage.title || "Mini Preview SD", latestImage, true);
     }
 
     function initialize() {
