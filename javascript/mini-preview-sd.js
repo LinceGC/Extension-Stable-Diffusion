@@ -24,6 +24,12 @@
         dragOffsetY: 0,
         resizeObserver: null,
         mutationObserver: null,
+        pipCanvas: null,
+        pipContext: null,
+        pipVideo: null,
+        pipReady: false,
+        nativePipOpen: false,
+        fallbackPanelOpen: false,
     };
 
     function loadSavedState() {
@@ -245,6 +251,132 @@
         state.image.src = src;
         state.image.alt = label || "Mini Preview SD";
         state.title.textContent = label || "Mini Preview SD";
+        updateNativePipImage(src);
+    }
+
+    function supportsNativePictureInPicture() {
+        return Boolean(
+            document.pictureInPictureEnabled &&
+            HTMLVideoElement.prototype.requestPictureInPicture &&
+            HTMLCanvasElement.prototype.captureStream
+        );
+    }
+
+    function drawPipPlaceholder() {
+        if (!state.pipContext || !state.pipCanvas) return;
+
+        state.pipCanvas.width = 640;
+        state.pipCanvas.height = 360;
+        state.pipContext.fillStyle = "#111";
+        state.pipContext.fillRect(0, 0, state.pipCanvas.width, state.pipCanvas.height);
+        state.pipContext.fillStyle = "#f5f5f5";
+        state.pipContext.font = "24px sans-serif";
+        state.pipContext.textAlign = "center";
+        state.pipContext.textBaseline = "middle";
+        state.pipContext.fillText("Mini Preview SD", state.pipCanvas.width / 2, state.pipCanvas.height / 2);
+    }
+
+    function drawImageToPipCanvas(image) {
+        if (!state.pipContext || !state.pipCanvas || !image.naturalWidth || !image.naturalHeight) return;
+
+        const maxSide = 1280;
+        const scale = Math.min(1, maxSide / Math.max(image.naturalWidth, image.naturalHeight));
+        const width = Math.max(1, Math.round(image.naturalWidth * scale));
+        const height = Math.max(1, Math.round(image.naturalHeight * scale));
+
+        if (state.pipCanvas.width !== width || state.pipCanvas.height !== height) {
+            state.pipCanvas.width = width;
+            state.pipCanvas.height = height;
+        }
+
+        state.pipContext.fillStyle = "#000";
+        state.pipContext.fillRect(0, 0, width, height);
+        state.pipContext.drawImage(image, 0, 0, width, height);
+    }
+
+    function ensureNativePipEngine() {
+        if (!supportsNativePictureInPicture()) return false;
+        if (state.pipReady) return true;
+
+        const canvas = document.createElement("canvas");
+        const context = canvas.getContext("2d");
+        const video = document.createElement("video");
+
+        if (!context) return false;
+
+        state.pipCanvas = canvas;
+        state.pipContext = context;
+        drawPipPlaceholder();
+
+        video.muted = true;
+        video.playsInline = true;
+        video.autoplay = true;
+        video.style.position = "fixed";
+        video.style.width = "1px";
+        video.style.height = "1px";
+        video.style.opacity = "0";
+        video.style.pointerEvents = "none";
+        video.style.left = "-9999px";
+        video.srcObject = canvas.captureStream(2);
+        video.addEventListener("leavepictureinpicture", () => {
+            state.nativePipOpen = false;
+            state.visible = state.fallbackPanelOpen;
+        });
+
+        document.body.appendChild(video);
+        state.pipVideo = video;
+        state.pipReady = true;
+        video.play().catch(() => {
+            // Some browsers defer playback until the user clicks the Imagen en imagen button.
+        });
+        return true;
+    }
+
+    function updateNativePipImage(src) {
+        if (!state.pipReady || !src) return;
+
+        const image = new Image();
+        image.onload = () => {
+            try {
+                drawImageToPipCanvas(image);
+            } catch (error) {
+                drawPipPlaceholder();
+            }
+        };
+        image.src = src;
+    }
+
+    async function openNativePictureInPicture(img) {
+        if (!ensureNativePipEngine()) return false;
+
+        const sourceImage = img || findLatestPreviewImage();
+        if (sourceImage) {
+            const src = getImageSrc(sourceImage);
+            setFloatingImage(src, sourceImage.alt || sourceImage.title || "Mini Preview SD");
+        }
+
+        try {
+            const playPromise = state.pipVideo.play();
+            if (document.pictureInPictureElement !== state.pipVideo) {
+                await state.pipVideo.requestPictureInPicture();
+            }
+            if (playPromise && typeof playPromise.catch === "function") {
+                await playPromise.catch(() => null);
+            }
+            state.nativePipOpen = true;
+            state.visible = true;
+            return true;
+        } catch (error) {
+            state.nativePipOpen = false;
+            return false;
+        }
+    }
+
+    async function openPictureInPicture(img) {
+        const openedNativePip = await openNativePictureInPicture(img);
+        if (!openedNativePip) {
+            openFloatingPreview(img);
+        }
     }
 
     function openFloatingPreview(img) {
@@ -257,13 +389,15 @@
         }
 
         state.visible = true;
+        state.fallbackPanelOpen = true;
         state.panel.classList.add(`${NS}--visible`);
         savePanelState();
     }
 
     function closeFloatingPreview() {
         if (!state.panel) return;
-        state.visible = false;
+        state.fallbackPanelOpen = false;
+        state.visible = state.nativePipOpen;
         state.panel.classList.remove(`${NS}--visible`);
         savePanelState();
     }
@@ -414,7 +548,7 @@
         pipButton.addEventListener("click", () => {
             const srcImg = state.menu.__sourceImage || findLatestPreviewImage();
             hideMenu();
-            openFloatingPreview(srcImg);
+            openPictureInPicture(srcImg);
         });
 
         menu.append(pipButton);
@@ -457,8 +591,8 @@
         button.type = "button";
         button.className = `${NS}__button`;
         button.textContent = "Imagen en imagen";
-        button.title = "Abrir Mini Preview SD con la última preview o generación";
-        button.addEventListener("click", () => openFloatingPreview(findLatestPreviewImage()));
+        button.title = "Abrir Mini Preview SD como Picture-in-Picture nativo; usa el panel interno si el navegador no lo soporta";
+        button.addEventListener("click", () => openPictureInPicture(findLatestPreviewImage()));
         return button;
     }
 
@@ -492,7 +626,7 @@
     }
 
     function scanLatestPreview() {
-        if (!state.visible || !state.followLatest) return;
+        if ((!state.visible && !state.nativePipOpen && !state.fallbackPanelOpen) || !state.followLatest) return;
 
         const latestImage = findLatestPreviewImage();
         const src = getImageSrc(latestImage);
