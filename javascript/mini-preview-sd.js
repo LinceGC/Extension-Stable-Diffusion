@@ -30,6 +30,8 @@
         pipReady: false,
         nativePipOpen: false,
         fallbackPanelOpen: false,
+        scanScheduled: false,
+        lastNativePipDrawAt: 0,
     };
 
     function loadSavedState() {
@@ -252,7 +254,7 @@
         if (!src) return;
         ensurePanel();
 
-        const shouldUpdatePanelImage = forceRefresh || src !== state.lastImageSrc;
+        const shouldUpdatePanelImage = src !== state.lastImageSrc;
         state.lastImageSrc = src;
         state.image.alt = label || "Mini Preview SD";
         state.title.textContent = label || "Mini Preview SD";
@@ -262,10 +264,10 @@
         }
 
         if (sourceImage) {
-            const updatedFromElement = updateNativePipFromElement(sourceImage);
-            if (!updatedFromElement) updateNativePipImage(src);
+            const updatedFromElement = updateNativePipFromElement(sourceImage, forceRefresh);
+            if (!updatedFromElement) updateNativePipImage(src, forceRefresh);
         } else {
-            updateNativePipImage(src);
+            updateNativePipImage(src, forceRefresh);
         }
     }
 
@@ -294,7 +296,7 @@
     function drawImageToPipCanvas(image) {
         if (!state.pipContext || !state.pipCanvas || !image.naturalWidth || !image.naturalHeight) return;
 
-        const maxSide = 1280;
+        const maxSide = 960;
         const scale = Math.min(1, maxSide / Math.max(image.naturalWidth, image.naturalHeight));
         const width = Math.max(1, Math.round(image.naturalWidth * scale));
         const height = Math.max(1, Math.round(image.naturalHeight * scale));
@@ -347,19 +349,34 @@
         return true;
     }
 
-    function updateNativePipFromElement(image) {
-        if (!state.pipReady || !(image instanceof HTMLImageElement) || !image.complete) return false;
+    function canDrawNativePip(forceRefresh) {
+        if (!state.pipReady) return false;
+
+        const now = Date.now();
+        const minInterval = forceRefresh ? 500 : 1000;
+        return now - state.lastNativePipDrawAt >= minInterval;
+    }
+
+    function markNativePipDraw() {
+        state.lastNativePipDrawAt = Date.now();
+    }
+
+    function updateNativePipFromElement(image, forceRefresh) {
+        if (!(image instanceof HTMLImageElement) || !image.complete || !canDrawNativePip(forceRefresh)) return false;
 
         try {
             drawImageToPipCanvas(image);
+            markNativePipDraw();
             return true;
         } catch (error) {
             return false;
         }
     }
 
-    function updateNativePipImage(src) {
-        if (!state.pipReady || !src) return;
+    function updateNativePipImage(src, forceRefresh) {
+        if (!src || !canDrawNativePip(forceRefresh)) return;
+
+        markNativePipDraw();
 
         const image = new Image();
         image.onload = () => {
@@ -652,11 +669,20 @@
     }
 
     function scanLatestPreview() {
+        state.scanScheduled = false;
         if ((!state.visible && !state.nativePipOpen && !state.fallbackPanelOpen) || !state.followLatest) return;
 
         const latestImage = findLatestPreviewImage();
         const src = getImageSrc(latestImage);
         if (src) setFloatingImage(src, latestImage.alt || latestImage.title || "Mini Preview SD", latestImage, true);
+    }
+
+    function schedulePreviewScan() {
+        ensureButton();
+        if (state.scanScheduled) return;
+
+        state.scanScheduled = true;
+        window.setTimeout(scanLatestPreview, 250);
     }
 
     function initialize() {
@@ -670,15 +696,12 @@
             if (event.key === "Escape") hideMenu();
         });
 
-        state.mutationObserver = new MutationObserver(() => {
-            ensureButton();
-            scanLatestPreview();
-        });
+        state.mutationObserver = new MutationObserver(schedulePreviewScan);
         state.mutationObserver.observe(document.body, {
             childList: true,
             subtree: true,
             attributes: true,
-            attributeFilter: ["src", "style", "class"],
+            attributeFilter: ["src"],
         });
 
         setInterval(scanLatestPreview, 1000);
